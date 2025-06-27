@@ -1,13 +1,25 @@
 package database
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
+	"path/filepath"
+
 	"rtsp_streamer/config"
+
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
+	gormpg "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-func connect() (*sql.DB, error) {
+func DBConnection() (*gorm.DB, error) {
+	err := config.LoadEnv()
+	if err != nil {
+		log.Fatalf("Ошибка загрузки файла .env: %v", err)
+	}
+
 	dbHost := config.GetEnv("DB_HOST")
 	dbPort := config.GetEnv("DB_PORT")
 	dbUser := config.GetEnv("DB_USER")
@@ -15,67 +27,68 @@ func connect() (*sql.DB, error) {
 	dbName := config.GetEnv("DB_NAME")
 	dbSSLMode := config.GetEnv("DB_SSLMODE")
 
-	connStr := fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		dbHost, dbPort, dbUser, dbPassword, dbName, dbSSLMode,
 	)
 
-	return sql.Open("postgres", connStr)
-}
-
-func DBConnection() (*sql.DB, error) {
-	err := config.LoadEnv()
-	if err != nil {
-		log.Fatalf("Ошибка загрузки файла .env: %v", err)
-	}
-
-	db, err := connect()
+	db, err := gorm.Open(gormpg.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("ошибка подключения к базе данных: %v", err)
 	}
 
-	err = db.Ping()
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения sql.DB: %v", err)
+	}
+
+	err = sqlDB.Ping()
 	if err != nil {
 		return nil, fmt.Errorf("не удалось подключиться к базе данных: %v", err)
 	}
+
 	log.Println("Успешное подключение к базе данных")
+
+	err = runMigrations(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выполнения миграций: %v", err)
+	}
 
 	return db, nil
 }
 
-func GetCamerasID(db *sql.DB) ([]Camera, error) {
-	rows, err := db.Query("SELECT id FROM cameras")
+func runMigrations(dsn string) error {
+	absPath, err := filepath.Abs("./database/migrations")
 	if err != nil {
-		return nil, fmt.Errorf("ошибка при получении списка камер: %v", err)
+		return fmt.Errorf("ошибка получения пути к миграциям: %v", err)
 	}
-	defer rows.Close()
+	migrationPath := "file://" + absPath
 
-	var cameras []Camera
-	for rows.Next() {
-		var camera Camera
-		if err := rows.Scan(&camera.ID); err != nil {
-			return nil, fmt.Errorf("ошибка при сканировании данных: %v", err)
-		}
-		cameras = append(cameras, camera)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ошибка при обработке строк: %v", err)
-	}
-
-	return cameras, nil
-}
-
-func GetCameraByID(cameraID int, db *sql.DB) (Camera, error) {
-	query := "SELECT rtsp_url FROM cameras WHERE id = $1"
-
-	row := db.QueryRow(query, cameraID)
-
-	var camera Camera
-
-	err := row.Scan(&camera.RtspURL)
+	db, err := gorm.Open(gormpg.Open(dsn), &gorm.Config{})
 	if err != nil {
-		return Camera{}, err
+		return fmt.Errorf("ошибка подключения для миграций: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("ошибка получения sql.DB для миграций: %v", err)
+	}
+	defer sqlDB.Close()
+
+	driver, err := postgres.WithInstance(sqlDB, &postgres.Config{})
+	if err != nil {
+		return fmt.Errorf("ошибка создания драйвера миграций: %v", err)
 	}
 
-	return camera, nil
+	m, err := migrate.NewWithDatabaseInstance(migrationPath, "postgres", driver)
+	if err != nil {
+		return fmt.Errorf("ошибка инициализации миграций: %v", err)
+	}
+
+	err = m.Up()
+	if err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("ошибка выполнения миграций: %v", err)
+	}
+
+	log.Println("Миграции успешно выполнены")
+	return nil
 }

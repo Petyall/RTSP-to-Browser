@@ -1,0 +1,12 @@
+Команда для получения информации о видео потоке через FFprobe:
+
+ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,bit_rate,width,height,r_frame_rate -of csv=p=0 rtsp://camera_url
+
+-v error — отключает всю информацию, кроме сообщений об ошибках
+-select_streams v:0 — выбирает только первый видеопоток
+-show_entries stream=codec_name,bit_rate,width,height,r_frame_rate — указывает, какие параметры извлекать:
+    codec_name — название видеокодека (например, h264, hevc)
+    bit_rate — битрейт видеопотока
+    width, height — ширина и высота кадра
+    r_frame_rate — частота кадров (кадров в секунду)
+-of csv=p=0 — вывод результата в формате CSV без заголовков

@@ -1,0 +1,16 @@
+Команда для трансляции потока с камеры в формате HLS:
+
+ffmpeg -rtsp_transport tcp -i rtsp://camera_url -rtbufsize 20M -probesize 2000000 -analyzeduration 500000 -g 50 -force_key_frames expr:gte(t,n_forced*2) -hls_time 2 -hls_list_size 5 -hls_flags append_list+delete_segments -an -c:v copy path/to/stream.m3u8
+
+-rtsp_transport tcp — использование TCP для RTSP-соединения (более надёжное при нестабильной сети)
+-rtbufsize 20M — размер буфера RTSP на 20 мегабайт, используется для сглаживания задержек
+-probesize 2000000 — ограничение объема данных (в байтах) для анализа формата потока, уменьшает время инициализации
+-analyzeduration 500000 — продолжительность анализа потока (в микросекундах), влияет на скорость старта
+-g 50 — интервал между ключевыми кадрами, равен 50 кадрам, что необходимо для HLS
+-force_key_frames expr:gte(t,n_forced*2) — принудительное добавление ключевого кадра каждые 2 секунды
+-hls_time 2 — длительность одного HLS-сегмента — 2 секунды
+-hls_list_size 5 — количество сегментов в HLS-плейлисте — 5
+-hls_flags append_list+delete_segments — append_list сохраняет плейлист как общий файл, delete_segments удаляет старые сегменты
+-an — отключение аудио
+-c:v copy — копирование видеопотока без перекодирования (если кодек поддерживается напрямую)
+path/to/stream.m3u8 — путь к конечному HLS-плейлисту, по которому будет доступен поток

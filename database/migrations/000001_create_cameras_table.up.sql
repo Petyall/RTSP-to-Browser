@@ -1,0 +1,4 @@
+CREATE TABLE cameras (
+    id SERIAL PRIMARY KEY,
+    rtsp_url VARCHAR(255) NOT NULL
+);

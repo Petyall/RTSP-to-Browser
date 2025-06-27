@@ -1,27 +1,41 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"rtsp_streamer/database"
 	"rtsp_streamer/ffmpeg"
-	"rtsp_streamer/utils"
-
-	"github.com/gin-gonic/gin"
-
-	_ "github.com/lib/pq"
+	"rtsp_streamer/server"
+	"rtsp_streamer/storage"
 )
 
 func main() {
-	utils.CheckHLSFolder()
+	storage.CheckHLSFolder()
 
+	// Подключение к базе данных
 	db, err := database.DBConnection()
 	if err != nil {
 		log.Fatalf("Ошибка при подключении к базе данных: %v", err)
 	}
-	defer db.Close()
 
+	// Получение sql.DB для закрытия соединения
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("Ошибка при получении sql.DB: %v", err)
+	}
+
+	// Автомиграция
+	if err := db.AutoMigrate(&database.Camera{}); err != nil {
+		log.Fatalf("Ошибка при автомиграции: %v", err)
+	}
+
+	// Получение списка камер
 	cameras, err := database.GetCamerasID(db)
 	if err != nil {
 		log.Fatalf("Ошибка при получении камер: %v", err)
@@ -29,50 +43,51 @@ func main() {
 
 	fmt.Println("Список камер:")
 	for _, camera := range cameras {
-		fmt.Printf("ID: %d\n", camera.ID)
+		fmt.Printf("ID: %d, Name: %s\n", camera.ID, camera.Name)
 	}
 
-	r := gin.Default()
+	// Инициализация и запуск сервера
+	server := server.SetupServer(cameras)
 
+	// Создание контекста для graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Запуск FFmpeg-процессов с контекстом
 	for _, camera := range cameras {
-		ffmpeg.StartFFmpeg(camera.ID, db)
+		ffmpeg.StartFFmpeg(camera.ID, db, ctx)
 	}
 
-	r.StaticFS("/hls_files", gin.Dir(utils.HLSPath, false))
-	r.Use(func(c *gin.Context) {
-		if c.Request.URL.Path == "/hls_files" {
-			c.Writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+	// Запуск сервера в отдельной горутине
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Ошибка запуска сервера: %v", err)
 		}
-		c.Next()
-	})
+	}()
 
-	r.Static("/static", "./static")
+	// Ожидание сигнала завершения
+	<-ctx.Done()
+	log.Println("Получен сигнал завершения, начинаем graceful shutdown...")
 
-	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
-		c.Writer.Header().Set("Pragma", "no-cache")
-		c.Writer.Header().Set("Expires", "0")
-		c.Writer.Header().Set("Surrogate-Control", "no-store")
-		c.Next()
-	})
+	// Создание контекста для завершения с таймаутом
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	r.GET("/", func(c *gin.Context) {
-		c.HTML(200, "index.html", nil)
-	})
+	// Остановка всех FFmpeg-процессов
+	log.Println("Остановка FFmpeg-процессов...")
+	ffmpeg.StopAllFFmpeg()
 
-	r.GET("/api/cameras", func(c *gin.Context) {
-		var camerasList []database.CameraAPI
-		for _, camera := range cameras {
-			camerasList = append(camerasList, database.CameraAPI{
-				ID:   camera.ID,
-				Name: fmt.Sprintf("Camera %d", camera.ID),
-				URL:  fmt.Sprintf("/hls_files/camera_%d/stream.m3u8", camera.ID),
-			})
-		}
-		c.JSON(200, camerasList)
-	})
+	// Завершение работы HTTP-сервера
+	log.Println("Остановка HTTP-сервера...")
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Ошибка при завершении работы сервера: %v", err)
+	}
 
-	r.LoadHTMLFiles("./templates/index.html")
+	// Закрытие соединения с базой данных
+	log.Println("Закрытие соединения с базой данных...")
+	if err := sqlDB.Close(); err != nil {
+		log.Printf("Ошибка при закрытии соединения с базой данных: %v", err)
+	}
 
-	log.Fatal(r.Run("0.0.0.0:8080"))
+	log.Println("Приложение успешно остановлено")
 }
